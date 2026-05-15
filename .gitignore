@@ -1,0 +1,16 @@
+*.db
+*.csv
+*.html
+inspect_*.json
+token.json
+__pycache__/
+.env
+.venv/
+venv/
+*.pyc
+.claude/
+
+# 5MB Autodesk web hub webpack bundle, kept around as reference material
+# while reverse-engineering URL patterns. Not our code; not for commit.
+index.js
+fusion-version-history.code-workspace
