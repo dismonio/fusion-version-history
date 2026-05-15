@@ -124,7 +124,7 @@ def _make_callback_server() -> http.server.HTTPServer:
                 except (AttributeError, OSError):
                     pass
                 super().server_bind()
-        srv = _DualStack(("", CALLBACK_PORT), _CallbackHandler)
+        srv = _DualStack(("::1", CALLBACK_PORT), _CallbackHandler)
         srv.auth_code = srv.auth_state = srv.auth_error = None  # type: ignore[attr-defined]
         return srv
     except OSError:
@@ -192,8 +192,16 @@ def _run_auth_flow() -> dict:
 
 
 def _save_tokens(tokens: dict) -> None:
-    with open(_token_path(), "w", encoding="utf-8") as fh:
+    path = _token_path()
+    tmp_path = f"{path}.{os.getpid()}.tmp"
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(tokens, fh)
+    os.replace(tmp_path, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def _load_tokens() -> dict | None:
@@ -292,6 +300,10 @@ def aps_get_path(path_template: str, *path_ids: str) -> dict:
 
 def aps_get_url(url: str) -> dict:
     """GET a complete URL (e.g. links.next.href) without re-encoding it."""
+    parsed = urllib.parse.urlparse(url)
+    api_base = urllib.parse.urlparse(APS_API_BASE)
+    if parsed.scheme != "https" or parsed.netloc.lower() != api_base.netloc.lower():
+        raise RuntimeError(f"Refusing to follow non-APS pagination URL: {url}")
     return _aps_request(url)
 
 
@@ -497,6 +509,18 @@ CSV_COLUMNS = [
     "item_id", "version_urn",
 ]
 
+CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe_cell(value):
+    if isinstance(value, str) and value.startswith(CSV_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+def _csv_safe_row(row: Iterable) -> list:
+    return [_csv_safe_cell(value) for value in row]
+
 
 def export_csv(db_path: str, csv_path: str) -> int:
     conn = sqlite3.connect(db_path)
@@ -530,7 +554,7 @@ def export_csv(db_path: str, csv_path: str) -> int:
     with open(csv_path, "w", encoding="utf-8", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow(CSV_COLUMNS)
-        writer.writerows(rows)
+        writer.writerows(_csv_safe_row(row) for row in rows)
     return len(rows)
 
 
@@ -725,7 +749,7 @@ def _select_hub(hubs: list[dict], hub_filter: str | None) -> dict:
 
 def cmd_walk(db_path: str, csv_path: str, hub_filter: str | None,
              include_non_fusion: bool, since_last_run: bool, dry_run: bool) -> int:
-    conn = init_db(db_path)
+    conn = None if dry_run else init_db(db_path)
 
     hubs = list_hubs()
     if not hubs:
@@ -733,12 +757,13 @@ def cmd_walk(db_path: str, csv_path: str, hub_filter: str | None,
     hub = _select_hub(hubs, hub_filter)
     hub_attrs = hub.get("attributes") or {}
     _log(f"\nUsing hub: {hub_attrs.get('name')}  ({hub['id']})")
-    upsert_hub(conn, hub)
-    conn.commit()
+    if conn:
+        upsert_hub(conn, hub)
+        conn.commit()
 
     # Cache of items.last_modified_time keyed by item_id for --since-last-run.
     prev_modified: dict[str, str] = {}
-    if since_last_run:
+    if since_last_run and conn:
         for row in conn.execute("SELECT item_id, last_modified_time FROM items"):
             if row[1]:
                 prev_modified[row[0]] = row[1]
@@ -757,15 +782,17 @@ def cmd_walk(db_path: str, csv_path: str, hub_filter: str | None,
         proj_attrs = proj.get("attributes") or {}
         proj_name  = proj_attrs.get("name", "?")
         _log(f"=== [{pi}/{len(projects)}] Project: {proj_name} ({proj['id']}) ===")
-        upsert_project(conn, hub["id"], proj)
-        conn.commit()
+        if conn:
+            upsert_project(conn, hub["id"], proj)
+            conn.commit()
 
         top_folders = list_top_folders(hub["id"], proj["id"])
-        for tf in top_folders:
-            tf_attrs = tf.get("attributes") or {}
-            tf_name  = tf_attrs.get("displayName") or tf_attrs.get("name") or "(root)"
-            upsert_folder(conn, proj["id"], tf["id"], None, tf_name, "/" + tf_name)
-        conn.commit()
+        if conn:
+            for tf in top_folders:
+                tf_attrs = tf.get("attributes") or {}
+                tf_name  = tf_attrs.get("displayName") or tf_attrs.get("name") or "(root)"
+                upsert_folder(conn, proj["id"], tf["id"], None, tf_name, "/" + tf_name)
+            conn.commit()
 
         # Walk every top folder, collecting items and upserting subfolders inline.
         items_in_project: list[tuple[dict, str, str]] = []   # (item, folder_path, parent_folder_id)
@@ -776,12 +803,14 @@ def cmd_walk(db_path: str, csv_path: str, hub_filter: str | None,
                 proj["id"], tf["id"], (tf_name,)
             ):
                 if event_kind == "folder":
-                    sub_attrs = entry.get("attributes") or {}
-                    sub_name = sub_attrs.get("displayName") or sub_attrs.get("name") or "(unnamed)"
-                    upsert_folder(conn, proj["id"], entry["id"], parent_folder_id, sub_name, path_str)
+                    if conn:
+                        sub_attrs = entry.get("attributes") or {}
+                        sub_name = sub_attrs.get("displayName") or sub_attrs.get("name") or "(unnamed)"
+                        upsert_folder(conn, proj["id"], entry["id"], parent_folder_id, sub_name, path_str)
                 elif event_kind == "item":
                     items_in_project.append((entry, path_str, parent_folder_id))
-        conn.commit()
+        if conn:
+            conn.commit()
 
         if not include_non_fusion:
             items_in_project = [t for t in items_in_project if _fusion_filter(t[0])]
@@ -789,7 +818,8 @@ def cmd_walk(db_path: str, csv_path: str, hub_filter: str | None,
         for ii, (item, fpath, parent_folder_id) in enumerate(items_in_project, start=1):
             attrs = item.get("attributes") or {}
             display = attrs.get("displayName", "?")
-            upsert_item(conn, proj["id"], parent_folder_id, item)
+            if conn:
+                upsert_item(conn, proj["id"], parent_folder_id, item)
             total_items += 1
 
             if dry_run:
@@ -806,19 +836,23 @@ def cmd_walk(db_path: str, csv_path: str, hub_filter: str | None,
                 versions = list_versions(proj["id"], item["id"])
             except RuntimeError as e:
                 msg = str(e)[:300]
-                upsert_item(conn, proj["id"], parent_folder_id, item, fetch_error=msg)
-                conn.commit()
+                if conn:
+                    upsert_item(conn, proj["id"], parent_folder_id, item, fetch_error=msg)
+                    conn.commit()
                 _log(f"  [{ii}/{len(items_in_project)}] {fpath} {display} -- FAILED: {msg[:120]}")
                 total_failed += 1
                 continue
 
             for v in versions:
-                upsert_version(conn, item["id"], v)
+                if conn:
+                    upsert_version(conn, item["id"], v)
             total_versions += len(versions)
-            conn.commit()
+            if conn:
+                conn.commit()
             _log(f"  [{ii}/{len(items_in_project)}] {fpath} {display} ({len(versions)} versions)")
 
-    conn.close()
+    if conn:
+        conn.close()
 
     if dry_run:
         _log(f"\nDry-run summary: walked {total_items} item(s) across {len(projects)} project(s). "
