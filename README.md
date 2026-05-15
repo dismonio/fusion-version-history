@@ -57,6 +57,29 @@ exchange. The script's error message will point you here.
 pip install -r requirements.txt
 ```
 
+## Easy ways to run it (no terminal thinking)
+
+Once setup above is done, you usually don't need to remember the individual
+commands. Two convenience wrappers:
+
+- **`update_and_view.bat`** -- double-click. Runs an incremental refresh
+  (`--since-last-run`), regenerates the HTML viewer, and opens it in your
+  default browser. The terminal window stays open if anything fails so you
+  can read the error.
+- **`launcher.bat`** -- double-click. Wraps `python launcher.py` and keeps
+  the console window open. Same web UI as below, no terminal required.
+- **`launcher.py`** -- `python launcher.py` from any terminal. Boots a tiny
+  local web server on `http://127.0.0.1:8765` and auto-opens it in your
+  browser. You get a status panel (item / version counts, last walk time),
+  a hub dropdown (no stdin prompt), buttons for incremental refresh, full
+  walk, regenerate viewer, open viewer, re-authenticate, and a live log
+  pane that streams subprocess output via Server-Sent Events. Stdlib only,
+  no Flask. Bind is `127.0.0.1` only, never the network.
+
+For initial setup or one-off diagnostics, the raw `python
+fusion_version_history.py ...` commands documented below are still the
+right entry point. Everything else can go through the launcher.
+
 ## Run the diagnostic first
 
 Pick one design you remember saving a lot (e.g. "Bracket" you saved ~50
@@ -186,6 +209,7 @@ revision was saved -- the answer you're looking for.
 | `--include-non-fusion` | Include STEP/IGES/etc. (default filters to `.f3d`/`.f3z`). |
 | `--dry-run` | Walk folders and count items, no `/versions` calls, no DB writes. |
 | `--verbose` | Log every HTTP request and retry. |
+| `--list-hubs-json` | Print hubs as JSON to stdout and exit (used by `launcher.py`; no interactive prompt). |
 
 ## Where things live
 
@@ -210,7 +234,15 @@ revision was saved -- the answer you're looking for.
   and resumes; just wait it out. For a large hub the full walk may take a
   while.
 - **Token says expired but refresh fails.** Run with `--reauth` to force a
-  fresh interactive login.
+  fresh interactive login (or click **Re-authenticate** in the launcher).
+- **Launcher says "Could not bind 127.0.0.1:8765".** Another process is
+  already on that port (or another instance of the launcher is running).
+  Close the duplicate and try again, or edit `LAUNCHER_PORT` near the top of
+  `launcher.py`.
+- **Launcher's "Open viewer" button does nothing.** The viewer is served
+  inline at `http://127.0.0.1:8765/viewer` (browsers block `file://` from
+  `http://` origins). If the page is blank, check the launcher's terminal
+  for errors -- the regen step may have failed.
 
 ## Why this tool matters (and why to re-run it)
 

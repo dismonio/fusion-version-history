@@ -898,6 +898,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                    help="Walk folders and count items, skip /versions and DB writes.")
     p.add_argument("--verbose", action="store_true",
                    help="Log every HTTP request and retry.")
+    p.add_argument("--list-hubs-json", action="store_true",
+                   help="Print available hubs as JSON to stdout and exit. "
+                        "Used by the launcher to populate a hub dropdown "
+                        "without triggering an interactive prompt.")
     return p.parse_args(argv)
 
 
@@ -908,6 +912,19 @@ def main(argv: list[str] | None = None) -> int:
 
     token = _ensure_access_token(reauth=args.reauth)
     _set_access_token(token)
+
+    if args.list_hubs_json:
+        hubs = list_hubs()
+        out = [
+            {
+                "id": h["id"],
+                "name": (h.get("attributes") or {}).get("name", ""),
+                "type": ((h.get("attributes") or {}).get("extension") or {}).get("type", ""),
+            }
+            for h in hubs
+        ]
+        print(json.dumps(out, indent=2))
+        return 0
 
     if args.inspect_item:
         return cmd_inspect(args.inspect_item, by_id=True)
